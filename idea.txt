@@ -1,0 +1,49 @@
+Puncts {
+    0: "(<",
+    1: "(",
+}
+
+Words = [_]*  [A-Z] [_A-Z0-9]*    &[^a-z]   <ConstIdent>
+      | [_]*  [A-Z] [_A-Za-z0-9]*           <TypeIdent>
+      | [_]*  [a-z] [_A-Za-z0-9]*           <VarIdent>
+      | [0-9] [_A-Za-z0-9]*                 <Number>
+      ;
+
+VM:
+    PUSH / SAVE
+    POP  / ROLLBACK
+    DROP / FORGET
+    CHAR ou STRING (tester la perf)
+    CLASS
+    BEGINTOKEN
+    ENDTOKEN
+
+---
+
+globalMap:
+Map {
+    [_] : {
+        moreOfTheSame;
+        [A-Z]: Map {
+            
+        }
+    }
+
+
+
+    '(': Map {
+        '<': Done { 0 }
+        any: Done { 1 }
+    }
+}
+
+nextLookup = globalMap;
+read '('
+nextLookup = globalMap['('];
+    | read '<'
+    | store Token { 0 }
+    | nextLookup = globalMap
+
+    | read any
+    | store Token { 1 }
+    | nextLookup = globalMap
