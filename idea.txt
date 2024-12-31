@@ -1,13 +1,18 @@
-Puncts {
-    0: "(<",
-    1: "(",
-}
+Puncts = <LGEN> "(<", <RGEN> ">)"
+       | <LPAR> "(" , <RPAR> ")"
+       | <LT>     "<"
+       | <GT>     ">"
+       | <LTE>    "<="
+       | <GTE>    ">="
+       | <LSHIFT> "<<"
+       | <RSHIFT> "<<"
+       ;
 
-Words = [_]*  [A-Z] [_A-Z0-9]*    &[^a-z]   <ConstIdent>
-      | [_]*  [A-Z] [_A-Za-z0-9]*           <TypeIdent>
-      | [_]*  [a-z] [_A-Za-z0-9]*           <VarIdent>
-      | [0-9] [_A-Za-z0-9]*                 <Number>
-      ;
+Words  = <ConstIdent> [_]*  [A-Z] [_A-Z0-9]*    &[^a-z]
+       | <TypeIdent>  [_]*  [A-Z] [_A-Za-z0-9]*
+       | <VarIdent>   [_]*  [a-z] [_A-Za-z0-9]*
+       | <Number>     [0-9] [_A-Za-z0-9]*
+       ;
 
 VM:
     PUSH / SAVE

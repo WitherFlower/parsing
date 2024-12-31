@@ -1,123 +1,150 @@
+module parsing;
+
 import std::io;
 import std::time;
 import std::collections;
 
-// Parsing lexer grammar file
-
-// enum States {
-//     OUTER,     // Expect Keyword, then { --> BLOCK(Keyword) OR EOF --> DONE
-//     BLOCK,     // Expect Statement --> STATEMENT OR } --> OUTER
-//     STATEMENT, // Depends on the keyword --> BLOCK
-//     DONE,      // Good Job
-// }
-
-fn bool char.isWhitespace(char c) => (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+import parsing::charclass;
 
 fault ParsingError {
     INVALID_ESCAPE_SEQUENCE,
 }
 
+fn bool char.isWhitespace(char c) => (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+
 fn char! char.unescape(char c) {
     switch (c) {
-        case 'a': return '\a';
-        case 'b': return '\b';
-        case 'e': return '\e';
-        case 'f': return '\f';
-        case 'n': return '\n';
-        case 'r': return '\r';
-        case 't': return '\t';
-        case 'v': return '\v';
-        case '0': return '\0';
+        case  'a': return '\a';
+        case  'b': return '\b';
+        case  'e': return '\e';
+        case  'f': return '\f';
+        case  'n': return '\n';
+        case  'r': return '\r';
+        case  't': return '\t';
+        case  'v': return '\v';
+        case  '0': return '\0';
         case '\\': return '\\';
         default: return ParsingError.INVALID_ESCAPE_SEQUENCE?;
     }
 }
 
-def CharClass = char[32];
-
-fn bool CharClass.contains(self, char c) => ((self[c / 8] >> (c % 8)) & 1 == 1);
-
-fn CharClass* newFromString(String s, Allocator allocator = allocator::heap()) {
-    CharClass* result = allocator::alloc_array(allocator, char, 32);
-    mem::set(result, 0, 32);
-    char lastChar;
-    bool inRange = false;
-    bool escaping = false;
-    foreach (index, c : s) {
-        if (c == '\\' && !escaping) {
-            escaping = true;
-            continue;
-        }
-        if (escaping) {
-            c = c.unescape() ?? {|
-                io::printfn("Encountered invalid escape sequence : \\%c", c);
-                return ParsingError.INVALID_ESCAPE_SEQUENCE?;
-            |}!!;
-            escaping = false;
-        }
-        if (c == '-' && index != 0 && index != s.len - 1) {
-            inRange = true;
-        } else if (inRange) {
-            for (char x = lastChar; x <= c; x++) {
-                (*result)[x / 8] |= 1 << (x % 8);
-            }
-            inRange = false;
-        } else {
-            (*result)[c / 8] |= 1 << (c % 8);
-            lastChar = c;
-        }
-    }
-    return result;
+enum InstructionType {
+    PUSH,   // Save last token start and cursor position
+    POP,    // Restore last save
+    DROP,   // Forget last save
+    CLASS,  // Test character class match
+    CHAR,   // Test char equality
+    STRING, // Test string equality (tester la perf)
+    BEGIN,  // Begin Token (mark beginning of token)
+    END,    // End Token   (push to token list)
 }
 
-fn void testCharClass() {
-    CharClass* class = newFromString("a-z");
-    defer free(class);
-    assert(class.contains('a'));
-    assert(!class.contains('0'));
+struct Instruction {
+    InstructionType type;
+    uptr argument;
+    uptr optArgument;
+    usz ok;
+    usz ng;
+}
 
-    CharClass* class2 = newFromString("-01-9abc-ef");
-    defer free(class2);
-    assert(class2.contains('-'));
-    assert(class2.contains('0'));
-    assert(class2.contains('1'));
-    assert(class2.contains('8'));
-    assert(class2.contains('9'));
-    assert(class2.contains('a'));
-    assert(class2.contains('b'));
-    assert(class2.contains('c'));
-    assert(class2.contains('d'));
-    assert(class2.contains('e'));
-    assert(class2.contains('f'));
-    assert(!class2.contains('g'));
-    assert(!class2.contains('_'));
+fn bool Instruction.equals(self, Instruction other) {
+    return (
+        self.type == other.type
+        && self.argument == other.argument
+        && self.ok == other.ok
+        && self.ng == other.ng
+    );
+}
 
-    CharClass* class3 = newFromString("01-9abc-ef-");
-    defer free(class3);
-    assert(class3.contains('-'));
-    assert(class3.contains('0'));
-    assert(class3.contains('1'));
-    assert(class3.contains('8'));
-    assert(class3.contains('9'));
-    assert(class3.contains('a'));
-    assert(class3.contains('b'));
-    assert(class3.contains('c'));
-    assert(class3.contains('d'));
-    assert(class3.contains('e'));
-    assert(class3.contains('f'));
-    assert(!class3.contains('g'));
-    assert(!class3.contains('_'));
+def InstructionList = List(<Instruction>);
 
-    CharClass* class4 = newFromString("\\0-\\n");
-    defer free(class4);
-    assert(class4.contains('\0'));
-    assert(class4.contains('\n'));
-    assert(class4.contains('\x01'));
-    assert(class4.contains('\x02'));
-    assert(class4.contains('\x0a'));
-    assert(!class4.contains('\x0b'));
-    assert(!class4.contains('n'));
-    assert(!class4.contains('0'));
+interface Grammar {
+    fn void emitByteCode(InstructionList* instructions, usz ok, usz ng);
+}
+
+// Regex Star
+struct MatchAny (Grammar) {
+    Grammar expression;
+}
+
+fn void MatchAny.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    usz lastInstructionIndex = instructions.len();
+    self.expression.emitByteCode(instructions, ok, ok);
+    (*instructions)[lastInstructionIndex].ok = instructions.len() - 1;
+}
+
+// Regex Plus
+struct MatchMany (Grammar) {
+    Grammar expression;
+}
+
+fn void MatchMany.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    usz lastInstructionIndex = instructions.len();
+    self.expression.emitByteCode(instructions, ok, ok);
+    (*instructions)[lastInstructionIndex].ok = instructions.len() - 1;
+    self.expression.emitByteCode(instructions, instructions.len() - 1, ng);
+}
+
+struct MatchString (Grammar) {
+    String string;
+}
+
+fn void MatchString.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = STRING, .argument = (uptr)self.string.ptr, .optArgument = self.string.len, .ok = ok, .ng = ng });
+}
+
+struct ReturnSequence (Grammar) {
+    int tokenType;
+    Grammar[] expressions;
+}
+
+fn void ReturnSequence.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ng });
+    usz localNg = instructions.len() - 1;
+    (*instructions).push(Instruction { .type = POP, .ok = ok, .ng = ng });
+    usz nextOk = instructions.len() - 1;
+
+    (*instructions).push(Instruction { .type = END, .ok = nextOk, .ng = localNg });
+    nextOk = instructions.len() - 1;
+
+    foreach_r (expression : self.expressions) {
+        expression.emitByteCode(instructions, nextOk, localNg);
+        nextOk = instructions.len() - 1;
+    }
+
+    (*instructions).push(Instruction { .type = BEGIN, .argument = self.tokenType, .ok = nextOk, .ng = localNg });
+    nextOk = instructions.len() - 1;
+
+    (*instructions).push(Instruction { .type = PUSH, .ok = nextOk, .ng = localNg });
+}
+
+fn void testByteCodeGen() @test {
+    Grammar g =
+        &&ReturnSequence {
+            .tokenType = 4269,
+            .expressions = {
+                &&MatchMany {
+                    .expression = charclass::newFromString("a-z", allocator::temp())
+                },
+                &&MatchString {
+                    .string = "asdf"
+                },
+            },
+        };
+
+    InstructionList instructions;
+    instructions.temp_init();
+
+    g.emitByteCode(&instructions, 0, 0);
+
+    io::printn();
+    instructions.reverse();
+    foreach (index, &inst : instructions) {
+        inst.ok = instructions.len() - 1 - inst.ok;
+        inst.ng = instructions.len() - 1 - inst.ng;
+        io::printf("%03d: ", index);
+        io::printn(*inst);
+    }
 }
 
 // Lexing
@@ -132,8 +159,6 @@ enum LexingState {
 struct Token {
     LexingState type;
     String content;
-    // usz begin;
-    // usz length;
 }
 
 def TokenList = List(<Token>);
@@ -143,7 +168,6 @@ const INPUT_FILE = "resources/sqlite3.c";
 const BUFFER_SIZE = 65536;
 
 fn void main() {
-    testCharClass();
     // File grammarFile = file::open("yap.gmr", "r")!!;
     // defer (void)grammarFile.close();
     // File* stream = &grammarFile;
@@ -170,9 +194,9 @@ fn void main() {
     tokens.new_init();
     LexingState state = WHITESPACE;
 
-    CharClass* identHead = newFromString("A-Za-z_");
-    CharClass* identBody = newFromString("0-9A-Za-z_");
-    CharClass* numberHead = newFromString("0-9");
+    CharClass* identHead = charclass::newFromString("A-Za-z_");
+    CharClass* identBody = charclass::newFromString("0-9A-Za-z_");
+    CharClass* numberHead = charclass::newFromString("0-9");
     CharClass* numberBody = identBody;
 
     foreach (usz cursor, char c : input[:totalSize]) {
@@ -243,9 +267,19 @@ fn void main() {
 
     io::printfn("Puncts : %d, Idents: %d, Nums: %d", puncts, idents, nums);
 
-
     // while (try line = io::treadline(stream)) {
     //     String trimmedLine = line.trim();
     //     io::printfn("%03d | %s", trimmedLine.len, trimmedLine);
     // }
 }
+
+// Old Ideas
+// Parsing lexer grammar file
+
+// enum States {
+//     OUTER,     // Expect Keyword, then { --> BLOCK(Keyword) OR EOF --> DONE
+//     BLOCK,     // Expect Statement --> STATEMENT OR } --> OUTER
+//     STATEMENT, // Depends on the keyword --> BLOCK
+//     DONE,      // Good Job
+// }
+
