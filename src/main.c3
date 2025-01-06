@@ -98,13 +98,15 @@ struct ReturnSequence (Grammar) {
     Grammar[] expressions;
 }
 
+// TODO: Optimize bytecode generation in case there is only one element in sequence or in alternation.
+// Low priority as it should never happen in a real grammar anyway
 fn void ReturnSequence.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
-    (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ng });
-    usz localNg = instructions.len() - 1;
-    (*instructions).push(Instruction { .type = POP, .ok = ok, .ng = ng });
+    (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ok });
     usz nextOk = instructions.len() - 1;
+    (*instructions).push(Instruction { .type = POP, .ok = ng, .ng = ng });
+    usz localNg = instructions.len() - 1;
 
-    (*instructions).push(Instruction { .type = END, .ok = nextOk, .ng = localNg });
+    (*instructions).push(Instruction { .type = END, .ok = nextOk, .ng = nextOk });
     nextOk = instructions.len() - 1;
 
     foreach_r (expression : self.expressions) {
@@ -112,24 +114,77 @@ fn void ReturnSequence.emitByteCode(&self, InstructionList* instructions, usz ok
         nextOk = instructions.len() - 1;
     }
 
-    (*instructions).push(Instruction { .type = BEGIN, .argument = self.tokenType, .ok = nextOk, .ng = localNg });
+    (*instructions).push(Instruction { .type = BEGIN, .argument = self.tokenType, .ok = nextOk, .ng = nextOk });
     nextOk = instructions.len() - 1;
 
-    (*instructions).push(Instruction { .type = PUSH, .ok = nextOk, .ng = localNg });
+    (*instructions).push(Instruction { .type = PUSH, .ok = nextOk, .ng = nextOk });
+}
+
+struct Alternation (Grammar) {
+    Grammar[] expressions;
+}
+
+fn void Alternation.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ok });
+    usz localOk = instructions.len() - 1;
+    (*instructions).push(Instruction { .type = POP, .ok = ng, .ng = ng });
+    usz localNg = instructions.len() - 1;
+
+    usz nextNg = localNg;
+
+    foreach_r (expression : self.expressions) {
+        expression.emitByteCode(instructions, localOk, nextNg);
+        nextNg = instructions.len() - 1;
+    }
+
+    (*instructions).push(Instruction { .type = PUSH, .ok = nextNg, .ng = nextNg });
+}
+
+struct FollowedBy (Grammar) {
+    Grammar expression;
+}
+
+fn void FollowedBy.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = POP, .ok = ok, .ng = ok });
+    usz localOk = instructions.len() - 1;
+    (*instructions).push(Instruction { .type = POP, .ok = ng, .ng = ng });
+    usz localNg = instructions.len() - 1;
+
+    self.expression.emitByteCode(instructions, localOk, localNg);
+    localOk = instructions.len() - 1;
+
+    (*instructions).push(Instruction { .type = PUSH, .ok = localOk, .ng = localOk });
 }
 
 fn void testByteCodeGen() @test {
+    // g = <4269> [a-z]* &"asdf"
+    //   | <1337> "bonsoir"
     Grammar g =
-        &&ReturnSequence {
-            .tokenType = 4269,
+        &&Alternation {
             .expressions = {
-                &&MatchMany {
-                    .expression = charclass::newFromString("a-z", allocator::temp())
+                &&ReturnSequence {
+                    .tokenType = 4269,
+                    .expressions = {
+                        &&MatchMany {
+                            .expression = charclass::newFromString("a-z", allocator::temp())
+                        },
+                        &&FollowedBy {
+                            .expression =
+                                &&MatchString {
+                                    .string = "asdf"
+                                }
+                            }
+                        },
+                    }
+                &&ReturnSequence {
+                    .tokenType = 1337,
+                    .expressions = {
+                        &&MatchString {
+                            .string = "bonsoir"
+                        },
+                    },
                 },
-                &&MatchString {
-                    .string = "asdf"
-                },
-            },
+            }
         };
 
     InstructionList instructions;
