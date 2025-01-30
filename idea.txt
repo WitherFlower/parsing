@@ -25,6 +25,22 @@ VM:
 
 ---
 
+Jumptable pour lexer à la vitesse de la lumière
+
+Puncts   = "(<", "(", "<", "<=", "<<"
+Keywords = int, int128
+Words = [a-z]
+
+Table :
+'(' : instructions for (< and ( sorted in reverse-length alphabetical order
+'<' : same as above but <<, <= and < in this order
+'[a-hj-z]' : instructions for words like [a-z]
+'i' : keywords that start with i, order doesn't matter, need to check that, for every word type they match, they dont match more than the keyword length
+      then point to the first word type that matches a single 'i'
+other : point to an 'ERROR' instruction that'll either crash the lexer or produce an error token (typeid 0)
+
+---
+
 globalMap:
 Map {
     [_] : {

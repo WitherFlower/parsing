@@ -5,3 +5,4 @@ fn void main() {
     int x = 69;
     String* y = 0x1234;
 }
+

@@ -48,6 +48,10 @@ fn void CharClass.emitByteCode(&self, InstructionList* instructions, usz ok, usz
     });
 }
 
+fn bool CharClass.isValidStartingChar(&self, char c) @dynamic {
+    return self.contains(c);
+}
+
 fn void testCharClass() @test {
     CharClass* class = newFromString("a-z");
     defer free(class);

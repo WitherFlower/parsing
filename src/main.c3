@@ -34,6 +34,9 @@ enum InstructionType {
     DROP,   // Forget last save
     CLASS,  // Test character class match
     CHAR,   // Test char equality
+    DOT,    // Always match current character
+    RETRY,
+    JUMPTABLE,
     STRING, // Test string equality (tester la perf)
     BEGIN,  // Begin Token (mark beginning of token)
     END,    // End Token   (push to token list)
@@ -60,6 +63,7 @@ def InstructionList = List(<Instruction>);
 
 interface Grammar {
     fn void emitByteCode(InstructionList* instructions, usz ok, usz ng);
+    fn bool isValidStartingChar(char c);
 }
 
 // Regex Star
@@ -71,6 +75,10 @@ fn void MatchAny.emitByteCode(&self, InstructionList* instructions, usz ok, usz 
     usz lastInstructionIndex = instructions.len();
     self.expression.emitByteCode(instructions, ok, ok);
     (*instructions)[lastInstructionIndex].ok = instructions.len() - 1;
+}
+
+fn bool MatchAny.isValidStartingChar(&self, char c) @dynamic {
+    return self.expression.isValidStartingChar(c);
 }
 
 // Regex Plus
@@ -85,12 +93,42 @@ fn void MatchMany.emitByteCode(&self, InstructionList* instructions, usz ok, usz
     self.expression.emitByteCode(instructions, instructions.len() - 1, ng);
 }
 
+fn bool MatchMany.isValidStartingChar(&self, char c) @dynamic {
+    return self.expression.isValidStartingChar(c);
+}
+
 struct MatchString (Grammar) {
     String string;
 }
 
 fn void MatchString.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
     (*instructions).push(Instruction { .type = STRING, .argument = (uptr)self.string.ptr, .optArgument = self.string.len, .ok = ok, .ng = ng });
+}
+
+fn bool MatchString.isValidStartingChar(&self, char c) @dynamic {
+    return self.string.len > 0 && self.string[0] == c;
+}
+
+struct Sequence (Grammar) {
+    Grammar[] expressions;
+}
+
+fn void Sequence.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ok });
+    usz nextOk = instructions.len() - 1;
+    (*instructions).push(Instruction { .type = POP, .ok = ng, .ng = ng });
+    usz localNg = instructions.len() - 1;
+
+    foreach_r (expression : self.expressions) {
+        expression.emitByteCode(instructions, nextOk, localNg);
+        nextOk = instructions.len() - 1;
+    }
+
+    (*instructions).push(Instruction { .type = PUSH, .ok = nextOk, .ng = nextOk });
+}
+
+fn bool Sequence.isValidStartingChar(&self, char c) @dynamic {
+    return self.expressions.len > 0 && self.expressions[0].isValidStartingChar(c);
 }
 
 struct ReturnSequence (Grammar) {
@@ -120,6 +158,10 @@ fn void ReturnSequence.emitByteCode(&self, InstructionList* instructions, usz ok
     (*instructions).push(Instruction { .type = PUSH, .ok = nextOk, .ng = nextOk });
 }
 
+fn bool ReturnSequence.isValidStartingChar(&self, char c) @dynamic {
+    return self.expressions.len > 0 && self.expressions[0].isValidStartingChar(c);
+}
+
 struct Alternation (Grammar) {
     Grammar[] expressions;
 }
@@ -128,9 +170,7 @@ fn void Alternation.emitByteCode(&self, InstructionList* instructions, usz ok, u
     (*instructions).push(Instruction { .type = DROP, .ok = ok, .ng = ok });
     usz localOk = instructions.len() - 1;
     (*instructions).push(Instruction { .type = POP, .ok = ng, .ng = ng });
-    usz localNg = instructions.len() - 1;
-
-    usz nextNg = localNg;
+    usz nextNg = instructions.len() - 1;
 
     foreach_r (expression : self.expressions) {
         expression.emitByteCode(instructions, localOk, nextNg);
@@ -138,6 +178,37 @@ fn void Alternation.emitByteCode(&self, InstructionList* instructions, usz ok, u
     }
 
     (*instructions).push(Instruction { .type = PUSH, .ok = nextNg, .ng = nextNg });
+}
+
+fn bool Alternation.isValidStartingChar(&self, char c) @dynamic {
+    if (self.expressions.len == 0) return false;
+    foreach (expr : self.expressions) {
+        if (expr.isValidStartingChar(c)) return true;
+    }
+    return false;
+}
+
+struct LexerRoot (Grammar) {
+    Grammar[] expressions;
+}
+
+fn void LexerRoot.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    usz nextNg = ng;
+    usz[] jumpTable = allocator::alloc_array(allocator::heap(), usz, 256);
+    foreach_r (expression : self.expressions) {
+        expression.emitByteCode(instructions, ok, nextNg);
+        nextNg = instructions.len() - 1;
+        for (int c = 0; c < 256; c++) {
+            if (expression.isValidStartingChar((char)c)) {
+                jumpTable[c] = nextNg;
+            }
+        }
+    }
+    (*instructions).push(Instruction { .type = JUMPTABLE, .argument = (uptr)jumpTable.ptr, .ok = nextNg, .ng = nextNg });
+}
+
+fn bool LexerRoot.isValidStartingChar(&self, char c) @dynamic {
+    unreachable();
 }
 
 struct FollowedBy (Grammar) {
@@ -156,39 +227,177 @@ fn void FollowedBy.emitByteCode(&self, InstructionList* instructions, usz ok, us
     (*instructions).push(Instruction { .type = PUSH, .ok = localOk, .ng = localOk });
 }
 
-fn void testByteCodeGen() @test {
+fn bool FollowedBy.isValidStartingChar(&self, char c) @dynamic {
+    unreachable();
+}
+
+distinct Dot = char;
+
+const Grammar DOT = (Grammar)&&(Dot)'0';
+
+fn void Dot.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
+    (*instructions).push(Instruction { .type = DOT, .ok = ok, .ng = ok });
+}
+
+fn bool Dot.isValidStartingChar(&self, char c) @dynamic {
+    return true;
+}
+
+struct Context {
+    usz position;
+    usz beginTokenIndex;
+    int tokenType;
+}
+
+def ContextList = List(<Context>);
+
+fn void runVm(InstructionList instructions, String input, usz inputLength, TokenList* tokens) {
+    ContextList stack;
+    stack.temp_init();
+
+    Context ctx;
+
+    Instruction inst = instructions[0];
+    for LOOP: (;;) {
+        switch (inst.type) {
+            case PUSH:
+                stack.push(ctx);
+                inst = instructions[inst.ok];
+            case POP:
+                ctx = stack.pop()!!;
+                inst = instructions[inst.ok];
+            case DROP:
+                stack.pop()!!;
+                inst = instructions[inst.ok];
+            case CLASS:
+                CharClass* class = (CharClass*)inst.argument;
+                if (ctx.position < inputLength && class.contains(input[ctx.position])) {
+                    ctx.position++;
+                    inst = instructions[inst.ok];
+                } else {
+                    inst = instructions[inst.ng];
+                }
+            case STRING:
+                String s = (String)((char*)inst.argument)[:inst.optArgument];
+                if (s == input[ctx.position:inst.optArgument]) {
+                    ctx.position++;
+                    inst = instructions[inst.ok];
+                } else {
+                    inst = instructions[inst.ng];
+                }
+            case BEGIN:
+                ctx.beginTokenIndex = ctx.position;
+                ctx.tokenType = (int)inst.argument;
+                inst = instructions[inst.ok];
+            case END:
+                // TODO: move token type to END instruction argument
+                tokens.push(Token {
+                    (LexingState)ctx.tokenType,
+                    input[ctx.beginTokenIndex..ctx.position - 1],
+                });
+                inst = instructions[inst.ok];
+            case CHAR:
+                unreachable();
+            case DOT:
+                ctx.position++;
+                inst = instructions[inst.ok];
+            case RETRY:
+                // io::printfn("%d / %d", ctx.position, inputLength);
+                if (ctx.position >= inputLength) {
+                    break LOOP;
+                }
+                inst = instructions[0];
+            case JUMPTABLE:
+                usz[] jumpTable = ((ulong*)inst.argument)[:256];
+                inst = instructions[jumpTable[input[ctx.position]]];
+        }
+    }
+}
+
+fn TokenList testVm(String input, usz inputLength) {
+
+    Clock clock = clock::now();
+    io::printn("\n---VM TEST---");
+
     // g = <4269> [a-z]* &"asdf"
     //   | <1337> "bonsoir"
-    Grammar g =
-        &&Alternation {
-            .expressions = {
-                &&ReturnSequence {
-                    .tokenType = 4269,
-                    .expressions = {
-                        &&MatchMany {
-                            .expression = charclass::newFromString("a-z", allocator::temp())
-                        },
-                        &&FollowedBy {
-                            .expression =
-                                &&MatchString {
-                                    .string = "asdf"
-                                }
-                            }
-                        },
-                    }
-                &&ReturnSequence {
-                    .tokenType = 1337,
-                    .expressions = {
-                        &&MatchString {
-                            .string = "bonsoir"
-                        },
+
+    // Grammar g = &&Alternation {
+    //     .expressions = {
+    //         &&ReturnSequence {
+    //             .tokenType = 4269,
+    //             .expressions = {
+    //                 &&MatchMany {
+    //                     .expression = charclass::newFromString("a-z", allocator::temp())
+    //                 },
+    //                 &&FollowedBy {
+    //                     .expression = &&MatchString {
+    //                         .string = "asdf"
+    //                     }
+    //                 },
+    //             },
+    //         },
+    //         &&ReturnSequence {
+    //             .tokenType = 1337,
+    //             .expressions = {
+    //                 &&MatchString {
+    //                     .string = "bonsoir"
+    //                 },
+    //             },
+    //         },
+    //     }
+    // };
+
+    // g = [ \n\t]*
+    //   | <2> [A-Za-z_][0-9A-Za-z_]
+    //   | <3> [0-9][0-9A-Za-z_]
+    //   | <1> .
+    CharClass* identHead = charclass::newFromString("A-Za-z_");
+    CharClass* identBody = charclass::newFromString("0-9A-Za-z_");
+    CharClass* numberHead = charclass::newFromString("0-9");
+    CharClass* numberBody = identBody;
+    CharClass* whitespace = charclass::newFromString(" \r\n\t");
+
+    Grammar g = &&LexerRoot {
+        .expressions = {
+            &&Sequence {
+                .expressions = {
+                    &&MatchMany {
+                        .expression = whitespace
+                    },
+                }
+            },
+            &&ReturnSequence {
+                .tokenType = 2,
+                .expressions = {
+                    identHead,
+                    &&MatchAny {
+                        .expression = identBody
                     },
                 },
-            }
-        };
+            },
+            &&ReturnSequence {
+                .tokenType = 3,
+                .expressions = {
+                    numberHead,
+                    &&MatchAny {
+                        .expression = numberBody
+                    },
+                },
+            },
+            &&ReturnSequence {
+                .tokenType = 1,
+                .expressions = {
+                    DOT
+                }
+            },
+        }
+    };
 
     InstructionList instructions;
     instructions.temp_init();
+
+    instructions.push(Instruction { .type = RETRY, .ok = 0, .ng = 0 });
 
     g.emitByteCode(&instructions, 0, 0);
 
@@ -197,9 +406,30 @@ fn void testByteCodeGen() @test {
     foreach (index, &inst : instructions) {
         inst.ok = instructions.len() - 1 - inst.ok;
         inst.ng = instructions.len() - 1 - inst.ng;
-        io::printf("%03d: ", index);
-        io::printn(*inst);
+        if (inst.type == JUMPTABLE) {
+            usz[] jumpTable = ((ulong*)inst.argument)[:256];
+            foreach (&addr : jumpTable) {
+                *addr = instructions.len() - 1 - *addr;
+            }
+        }
+        // io::printf("%03d: ", index);
+        // io::printn(*inst);
     }
+
+    TokenList tokens;
+    tokens.new_init();
+
+    runVm(instructions, input, inputLength, &tokens);
+
+    NanoDuration duration = clock.mark();
+
+    io::printfn("Input size : %d Bytes", inputLength);
+    io::printfn("Lexing finished in %s", duration);
+
+    io::printfn("Recognized %d tokens", tokens.len());
+    io::printfn("Speed : %.02f Million tokens per second", tokens.len()/duration.to_sec()/1_000_000);
+
+    return tokens;
 }
 
 // Lexing
@@ -237,11 +467,11 @@ fn void main() {
     defer free(input);
 
     char[BUFFER_SIZE] buffer;
-    usz totalSize = 0;
+    usz inputLength = 0;
 
     while (try size = inputFile.read(&buffer) && size > 0) {
-        input[totalSize:size] = buffer[:size];
-        totalSize += size;
+        input[inputLength:size] = buffer[:size];
+        inputLength += size;
     }
 
     usz tokenBegin = 0;
@@ -254,7 +484,7 @@ fn void main() {
     CharClass* numberHead = charclass::newFromString("0-9");
     CharClass* numberBody = identBody;
 
-    foreach (usz cursor, char c : input[:totalSize]) {
+    foreach (usz cursor, char c : input[:inputLength]) {
         switch (state) {
             case WHITESPACE:
             case PUNCTUATION:
@@ -299,16 +529,21 @@ fn void main() {
     // foreach (token : tokens) {
     //     io::printn(token);
     // }
-    io::printfn("Input size : %d Bytes", totalSize);
+    io::printfn("Input size : %d Bytes", inputLength);
     io::printfn("Lexing finished in %s", duration);
 
     io::printfn("Recognized %d tokens", tokens.len());
     io::printfn("Speed : %.02f Million tokens per second", tokens.len()/duration.to_sec()/1_000_000);
 
+
+    TokenList vmTokens = testVm(input, inputLength);
+
     int puncts;
     int idents;
     int nums;
-    foreach (token : tokens) {
+    foreach (i, token : tokens) {
+        assert (token.type == vmTokens[i].type);
+        assert (token.content == vmTokens[i].content);
         switch (token.type) {
             case PUNCTUATION:
                 puncts++;
