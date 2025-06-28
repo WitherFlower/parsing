@@ -4,5 +4,8 @@ foreach
 for_
 foreach(
 for,for
+forfor
+_for
+for_each
 
 

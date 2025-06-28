@@ -2,11 +2,11 @@ module parsing::charclass;
 
 import std::io;
 
-def CharClass = char[32];
+alias CharClass = char[32];
 
 fn bool CharClass.contains(self, char c) => ((self[c / 8] >> (c % 8)) & 1 == 1);
 
-fn CharClass* newFromString(String s, Allocator allocator = allocator::heap()) {
+fn Grammar newFromString(String s, Allocator allocator = allocator::heap()) {
     CharClass* result = allocator::alloc_array(allocator, char, 32);
     mem::set(result, 0, 32);
     char lastChar;
@@ -18,10 +18,7 @@ fn CharClass* newFromString(String s, Allocator allocator = allocator::heap()) {
             continue;
         }
         if (escaping) {
-            c = c.unescape() ?? {|
-                io::printfn("Encountered invalid escape sequence : \\%c", c);
-                return ParsingError.INVALID_ESCAPE_SEQUENCE?;
-            |}!!;
+            c = c.unescape()!!;
             escaping = false;
         }
         if (c == '-' && index != 0 && index != s.len - 1) {
@@ -36,11 +33,11 @@ fn CharClass* newFromString(String s, Allocator allocator = allocator::heap()) {
             lastChar = c;
         }
     }
-    return result;
+    return (Grammar) { .type = CHARCLASS, .charClass = result };
 }
 
-fn void CharClass.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) @dynamic {
-    instructions.push(Instruction {
+fn void CharClass.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
+    instructions.push((Instruction) {
         .type = CLASS,
         .argument = (uptr)self,
         .ok = ok,
@@ -48,7 +45,7 @@ fn void CharClass.emitByteCode(&self, InstructionList* instructions, usz ok, usz
     });
 }
 
-fn bool CharClass.isValidStartingChar(&self, char c) @dynamic {
+fn bool CharClass.isValidStartingChar(&self, char c) {
     return self.contains(c);
 }
 
@@ -108,7 +105,7 @@ fn void testCharClassByteCode() @test {
     Grammar class = newFromString("a-z");
     class.emitByteCode(&instructions, 0, 0);
     assert(instructions.len() == 1);
-    assert(instructions[0].equals(Instruction { .type = CLASS, .argument = (uptr)class.ptr, .ok = 0, .ng = 0 }));
+    assert(instructions[0].equals((Instruction) { .type = CLASS, .argument = (uptr)class.ptr, .ok = 0, .ng = 0 }));
     assert(((CharClass*)instructions[0].argument).contains('c'));
     assert(!((CharClass*)instructions[0].argument).contains('A'));
 }
