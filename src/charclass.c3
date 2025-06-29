@@ -36,19 +36,6 @@ fn Grammar newFromString(String s, Allocator allocator = allocator::heap()) {
     return (Grammar) { .type = CHARCLASS, .charClass = result };
 }
 
-fn void CharClass.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    instructions.push((Instruction) {
-        .type = CLASS,
-        .argument = (uptr)self,
-        .ok = ok,
-        .ng = ng,
-    });
-}
-
-fn bool CharClass.isValidStartingChar(&self, char c) {
-    return self.contains(c);
-}
-
 fn void testCharClass() @test {
     CharClass* class = newFromString("a-z");
     defer free(class);

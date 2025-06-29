@@ -44,29 +44,10 @@ enum InstructionType {
     DELTOKEN,  // Delete token at given index counting from the end of the token list. (0 is last, 1 is second to last, etc...)
 }
 
-struct Instruction {
-    InstructionType type;
-    uptr argument;
-    uptr optArgument;
-    usz ok;
-    usz ng;
-}
+/*--------.
+| Grammar |
+`--------*/
 
-fn bool Instruction.equals(self, Instruction other) {
-    return (
-        self.type == other.type
-        && self.argument == other.argument
-        && self.ok == other.ok
-        && self.ng == other.ng
-    );
-}
-
-alias InstructionList = List {Instruction};
-
-// interface Grammar {
-//     fn void emitByteCode(InstructionList* instructions, usz ok, usz ng);
-//     fn bool isValidStartingChar(char c);
-// }
 enum GrammarType {
     STAR,
     PLUS,
@@ -107,16 +88,6 @@ fn Grammar newStar(Grammar *expr) {
     };
 }
 
-fn void Star.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    usz lastInstructionIndex = instructions.len();
-    self.expression.emitByteCode(instructions, ok, ok);
-    (*instructions)[lastInstructionIndex].ok = instructions.len() - 1;
-}
-
-fn bool Star.isValidStartingChar(&self, char c) {
-    return self.expression.isValidStartingChar(c);
-}
-
 // Regex Plus
 struct Plus {
     Grammar *expression;
@@ -127,17 +98,6 @@ fn Grammar newPlus(Grammar *expr) {
         .type = PLUS,
         .plus = { expr },
     };
-}
-
-fn void Plus.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    usz lastInstructionIndex = instructions.len();
-    self.expression.emitByteCode(instructions, ok, ok);
-    (*instructions)[lastInstructionIndex].ok = instructions.len() - 1;
-    self.expression.emitByteCode(instructions, instructions.len() - 1, ng);
-}
-
-fn bool Plus.isValidStartingChar(&self, char c) {
-    return self.expression.isValidStartingChar(c);
 }
 
 struct MatchString {
@@ -151,14 +111,6 @@ fn Grammar newMatchString(String s) {
     };
 }
 
-fn void MatchString.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    (*instructions).push((Instruction) { .type = STRING, .argument = (uptr)self.string.ptr, .optArgument = self.string.len, .ok = ok, .ng = ng });
-}
-
-fn bool MatchString.isValidStartingChar(&self, char c) {
-    return self.string.len > 0 && self.string[0] == c;
-}
-
 struct Sequence {
     Grammar[] expressions;
 }
@@ -168,29 +120,6 @@ fn Grammar newSequence(Grammar[] expressions) {
         .type = SEQUENCE,
         .sequence = { expressions },
     };
-}
-
-fn void Sequence.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    (*instructions).push((Instruction) { .type = DROP, .ok = ok, .ng = ok });
-    usz nextOk = instructions.len() - 1;
-    (*instructions).push((Instruction) { .type = POP, .ok = ng, .ng = ng });
-    usz localNg = instructions.len() - 1;
-
-    foreach_r (expression : self.expressions) {
-        expression.emitByteCode(instructions, nextOk, localNg);
-        nextOk = instructions.len() - 1;
-    }
-
-    (*instructions).push((Instruction) { .type = PUSH, .ok = nextOk, .ng = nextOk });
-}
-
-// FIXME: If a sequence starts by a character that can match nothing, it needs to check the next element.
-// Example :
-//      seq = [_]* [a-z]
-// Valid starting chars for this are _ and a-z
-
-fn bool Sequence.isValidStartingChar(&self, char c) {
-    return self.expressions.len > 0 && self.expressions[0].isValidStartingChar(c);
 }
 
 struct ReturnSequence {
@@ -205,32 +134,6 @@ fn Grammar newReturnSequence(int tokenType, Grammar[] expressions) {
     };
 }
 
-// TODO: Optimize bytecode generation in case there is only one element in sequence or in alternation.
-// Low priority as it should never happen in a real grammar anyway
-fn void ReturnSequence.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    (*instructions).push((Instruction) { .type = DROP, .ok = ok, .ng = ok });
-    usz nextOk = instructions.len() - 1;
-    (*instructions).push((Instruction) { .type = POP, .ok = ng, .ng = ng });
-    usz localNg = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = END, .ok = nextOk, .ng = nextOk });
-    nextOk = instructions.len() - 1;
-
-    foreach_r (expression : self.expressions) {
-        expression.emitByteCode(instructions, nextOk, localNg);
-        nextOk = instructions.len() - 1;
-    }
-
-    (*instructions).push((Instruction) { .type = BEGIN, .argument = self.tokenType, .ok = nextOk, .ng = nextOk });
-    nextOk = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = PUSH, .ok = nextOk, .ng = nextOk });
-}
-
-fn bool ReturnSequence.isValidStartingChar(&self, char c) {
-    return self.expressions.len > 0 && self.expressions[0].isValidStartingChar(c);
-}
-
 struct Alternation {
     Grammar[] expressions;
 }
@@ -240,28 +143,6 @@ fn Grammar newAlternation(Grammar[] expressions) {
         .type = ALTERNATION,
         .alternation = { expressions },
     };
-}
-
-fn void Alternation.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    (*instructions).push((Instruction) { .type = DROP, .ok = ok, .ng = ok });
-    usz localOk = instructions.len() - 1;
-    (*instructions).push((Instruction) { .type = POP, .ok = ng, .ng = ng });
-    usz nextNg = instructions.len() - 1;
-
-    foreach_r (expression : self.expressions) {
-        expression.emitByteCode(instructions, localOk, nextNg);
-        nextNg = instructions.len() - 1;
-    }
-
-    (*instructions).push((Instruction) { .type = PUSH, .ok = nextNg, .ng = nextNg });
-}
-
-fn bool Alternation.isValidStartingChar(&self, char c) {
-    if (self.expressions.len == 0) return false;
-    foreach (expr : self.expressions) {
-        if (expr.isValidStartingChar(c)) return true;
-    }
-    return false;
 }
 
 <*
@@ -328,114 +209,6 @@ ELSE
     SEEK r2, ok = RETRY
 */
 
-<*
-    This assumes that keywords and punctuations are sorted in the correct order
-*>
-fn void Lexer.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-
-    usz nextNg = ng;
-    usz[] wordJumpTable = allocator::alloc_array(allocator::heap(), usz, 256);
-    usz[] keywordJumpTable = allocator::alloc_array(allocator::heap(), usz, 256);
-
-    instructions.push((Instruction) { .type = RETRY, .ok = 0, .ng = 0 });
-    usz retryAddr = nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = SEEK, .argument = 2, .ok = retryAddr, .ng = retryAddr });
-    nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = DELTOKEN, .argument = 1, .ok = nextNg, .ng = nextNg });
-    usz discardWordTokenAddr = nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = SEEK, .argument = 1, .ok = retryAddr, .ng = retryAddr });
-    usz noKeywordParsedAddr = nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = DELTOKEN, .argument = 0, .ok = nextNg, .ng =  nextNg });
-    nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = GREATER, .argument = 2, .optArgument = 0, .ok = nextNg, .ng = noKeywordParsedAddr });
-    nextNg = instructions.len() - 1;
-
-    instructions.push((Instruction) { .type = GREATER, .argument = 1, .optArgument = 2, .ok = nextNg, .ng = discardWordTokenAddr });
-    nextNg = instructions.len() - 1;
-
-    /*
-        Position avant opération dans r0
-        Words dans r1
-        keywords dans r2
-    */
-
-    (*instructions).push((Instruction) { .type = MOVPOS, .argument = 2, .ok = nextNg, .ng = nextNg });
-    nextNg = instructions.len() - 1;
-    usz keywordNg = nextNg; /* const */
-    usz keywordOk = keywordNg;
-
-    // Besoin de set l'adresse par défaut de la jumpTable à l'adresse du handling du résultat du lexing des keywords
-    for (int i = 0; i < 256; i++) {
-        keywordJumpTable[i] = keywordNg;
-    }
-
-    // Keyword bytecode gen
-
-    // Pour chaque nouveau caractère de début, on met à jour la JT,
-    // et on set le NG des prochaines instructions comme étant celui d'avant la génération des instructions de keywords,
-    // ce qui permet de skip les instructions dont on sait qu'elles échoueront forcément.
-
-    int prevStartingChar = -1;
-
-    // Keyword bytecode gen
-    foreach_r (index, expression : self.keywords) {
-        (*instructions).push((Instruction) { .type = END, .ok = keywordOk, .ng = keywordOk });
-        usz nextOk = instructions.len() - 1;
-
-        expression.emitByteCode(instructions, nextOk, nextNg);
-        nextNg = instructions.len() - 1;
-
-        (*instructions).push((Instruction) { .type = BEGIN, .argument = index + TokenType.KEYWORD.ordinal + 1, .ok = nextNg, .ng = nextNg });
-        nextNg = instructions.len() - 1;
-
-        for (int c = 0; c < 256; c++) {
-            if (expression.isValidStartingChar((char)c)) {
-                keywordJumpTable[c] = nextNg;
-            }
-        }
-    }
-
-    (*instructions).push((Instruction) { .type = JUMPTABLE, .argument = (uptr)keywordJumpTable.ptr, .ok = nextNg, .ng = nextNg });
-    nextNg = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = SEEK, .argument = 0, .ok = nextNg, .ng = nextNg });
-    nextNg = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = MOVPOS, .argument = 1, .ok = nextNg, .ng = nextNg });
-    usz wordOk = nextNg = instructions.len() - 1;
-
-    for (int i = 0; i < 256; i++) {
-        wordJumpTable[i] = nextNg;
-    }
-
-    // Word bytecode gen
-    foreach_r (index, expression : self.wordPatterns) {
-        expression.emitByteCode(instructions, wordOk, nextNg);
-        nextNg = instructions.len() - 1;
-        for (int c = 0; c < 256; c++) {
-            if (expression.isValidStartingChar((char)c)) {
-                wordJumpTable[c] = nextNg;
-            }
-        }
-    }
-
-    (*instructions).push((Instruction) { .type = JUMPTABLE, .argument = (uptr)wordJumpTable.ptr, .ok = nextNg, .ng = nextNg });
-    nextNg = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = MOVPOS, .argument = 0, .ok = nextNg, .ng = nextNg });
-    nextNg = instructions.len() - 1;
-
-}
-
-fn bool Lexer.isValidStartingChar(&self, char c) {
-    unreachable();
-}
-
 struct FollowedBy {
     Grammar *expression;
 }
@@ -446,30 +219,6 @@ fn Grammar newFollowedBy(Grammar *expression) {
         .followedBy = { expression },
     };
 }
-
-fn void FollowedBy.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-    (*instructions).push((Instruction) { .type = POP, .ok = ok, .ng = ok });
-    usz localOk = instructions.len() - 1;
-    (*instructions).push((Instruction) { .type = POP, .ok = ng, .ng = ng });
-    usz localNg = instructions.len() - 1;
-
-    self.expression.emitByteCode(instructions, localOk, localNg);
-    localOk = instructions.len() - 1;
-
-    (*instructions).push((Instruction) { .type = PUSH, .ok = localOk, .ng = localOk });
-}
-
-fn bool FollowedBy.isValidStartingChar(&self, char c) {
-    unreachable();
-}
-
-// fn void Dot.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
-//     (*instructions).push((Instruction) { .type = DOT, .ok = ok, .ng = ok });
-// }
-//
-// fn bool Dot.isValidStartingChar(&self, char c) {
-//     return true;
-// }
 
 fn void Grammar.emitByteCode(&self, InstructionList* instructions, usz ok, usz ng) {
     switch (self.type) {
@@ -495,6 +244,8 @@ fn void Grammar.emitByteCode(&self, InstructionList* instructions, usz ok, usz n
                 .ng = ng,
             });
 
+        // TODO: Optimize bytecode generation in case there is only one element in sequence or in alternation.
+        // Low priority as it should never happen in a real grammar anyway
         case SEQUENCE:
             (*instructions).push((Instruction) { .type = DROP, .ok = ok, .ng = ok });
             usz nextOk = instructions.len() - 1;
@@ -666,6 +417,10 @@ fn bool Grammar.isValidStartingChar(&self, char c) {
         case CHARCLASS:
             return self.charClass.contains(c);
         case SEQUENCE:
+            // FIXME: If a sequence starts by a character that can match nothing, it needs to check the next element.
+            // Example :
+            //      seq = [_]* [a-z]
+            // Valid starting chars for this are _ and a-z
             return self.sequence.expressions.len > 0 && self.sequence.expressions[0].isValidStartingChar(c);
         case RETURNSEQUENCE:
             return self.returnSequence.expressions.len > 0 && self.returnSequence.expressions[0].isValidStartingChar(c);
@@ -681,7 +436,29 @@ fn bool Grammar.isValidStartingChar(&self, char c) {
     }
 }
 
-/**********************************************************************************************************************/
+/*----------------.
+| Virtual Machine |
+`----------------*/
+
+struct Instruction {
+    InstructionType type;
+    uptr argument;
+    uptr optArgument;
+    usz ok;
+    usz ng;
+}
+
+fn bool Instruction.equals(self, Instruction other) {
+    return (
+        self.type == other.type
+        && self.argument == other.argument
+        && self.ok == other.ok
+        && self.ng == other.ng
+    );
+}
+
+alias InstructionList = List { Instruction };
+
 
 struct Context {
     usz position;
@@ -689,7 +466,7 @@ struct Context {
     int tokenType;
 }
 
-alias ContextList = List {Context};
+alias ContextList = List { Context };
 
 fn void runVm(InstructionList instructions, String input, usz inputLength, TokenList* tokens) {
     ContextList stack; stack.tinit();
@@ -943,7 +720,7 @@ struct Token {
     String content;
 }
 
-alias TokenList = List {Token};
+alias TokenList = List { Token };
 
 const INPUT_FILE = "resources/min.txt";
 // const INPUT_FILE = "resources/input.c3";
